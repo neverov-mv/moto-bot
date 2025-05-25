@@ -4,29 +4,33 @@ import datetime
 import os
 
 from aiogram import Bot, Dispatcher, types
-from aiogram.types import ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import (
+    ReplyKeyboardMarkup,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton
+)
 from aiogram.utils import executor
 from aiogram.utils.callback_data import CallbackData
+from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters.state import State, StatesGroup
-from aiogram.contrib.fsm_storage.memory import MemoryStorage
 
-# ====== Ваш токен от BotFather ======
+# ====== Ваш токен ======
 API_TOKEN = "7598191280:AAH8Fowm7Vj57XBkrxsHsoPfku__3MqcrAQ"
-# ====================================
+# =======================
 
-# Настройка логирования
+# Логирование
 logging.basicConfig(level=logging.INFO)
 
-# Инициализируем бота и хранилище состояний
+# Инициализация бота и хранилища FSM
 bot = Bot(token=API_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(bot, storage=storage)
 
-# Для inline-кнопок: act:action:project:job
+# CallbackData для inline-кнопок
 cb = CallbackData("act", "action", "project", "job")
 
-# FSM-группы для состояний
+# FSM-состояния
 class ProjectForm(StatesGroup):
     waiting_for_project = State()
 
@@ -36,7 +40,7 @@ class JobForm(StatesGroup):
 # Папка для фото (если понадобится)
 os.makedirs("uploads", exist_ok=True)
 
-# Инициализация SQLite-базы
+# Инициализация базы данных
 def init_db():
     conn = sqlite3.connect("data.sqlite")
     c = conn.cursor()
@@ -70,14 +74,14 @@ def init_db():
 
 init_db()
 
-# --- /start и главное меню ---
+# /start — главное меню
 @dp.message_handler(commands=["start"])
 async def cmd_start(msg: types.Message):
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add("➕ Новый проект", "📋 Мои проекты")
     await msg.answer("Добро пожаловать в мотомастерскую!", reply_markup=kb)
 
-# --- Начало создания проекта ---
+# Начало создания проекта
 @dp.message_handler(lambda m: m.text == "➕ Новый проект", state="*")
 async def new_project_start(msg: types.Message):
     await msg.answer(
@@ -86,7 +90,7 @@ async def new_project_start(msg: types.Message):
     )
     await ProjectForm.waiting_for_project.set()
 
-# --- Сохранение проекта в БД ---
+# Сохранение проекта
 @dp.message_handler(state=ProjectForm.waiting_for_project, content_types=["text"])
 async def new_project_save(msg: types.Message, state: FSMContext):
     parts = msg.text.split(",", 1)
@@ -111,7 +115,7 @@ async def new_project_save(msg: types.Message, state: FSMContext):
     await msg.answer(f"✅ Проект #{pid} создан: {client} — {moto}", reply_markup=kb)
     await state.finish()
 
-# --- Список проектов ---
+# Список проектов
 @dp.message_handler(lambda m: m.text == "📋 Мои проекты", state="*")
 async def list_projects(msg: types.Message):
     conn = sqlite3.connect("data.sqlite")
@@ -131,14 +135,16 @@ async def list_projects(msg: types.Message):
         )
     await msg.answer("Выберите проект:", reply_markup=kb)
 
-# --- Просмотр деталей проекта ---
+# Просмотр проекта и работ + кнопки оплаты
 @dp.callback_query_handler(cb.filter(action="view"))
 async def callback_view_project(cbq: types.CallbackQuery, callback_data: dict):
     pid = int(callback_data["project"])
     conn = sqlite3.connect("data.sqlite")
     cur = conn.cursor()
     proj = cur.execute("SELECT client, moto FROM projects WHERE id=?", (pid,)).fetchone()
-    jobs = cur.execute("SELECT id, description, cost, done FROM jobs WHERE project_id=?", (pid,)).fetchall()
+    jobs = cur.execute(
+        "SELECT id, description, cost, done FROM jobs WHERE project_id=?", (pid,)
+    ).fetchall()
     conn.close()
 
     text = f"📋 Проект #{pid}: {proj[0]} — {proj[1]}\n\n🛠 Работы:\n"
@@ -149,26 +155,42 @@ async def callback_view_project(cbq: types.CallbackQuery, callback_data: dict):
     else:
         text += "— нет работ\n"
 
-    kb = InlineKeyboardMarkup()
+    kb = InlineKeyboardMarkup(row_width=1)
     kb.add(
-        InlineKeyboardButton("➕ Добавить работу", callback_data=cb.new(action="add_job", project=pid, job=0)),
-        InlineKeyboardButton("📌 Статус оплат", callback_data=cb.new(action="pay_status", project=pid, job=0))
+        InlineKeyboardButton(
+            "➕ Добавить работу",
+            callback_data=cb.new(action="add_job", project=pid, job=0)
+        ),
+        InlineKeyboardButton(
+            "📌 Статус оплат",
+            callback_data=cb.new(action="pay_status", project=pid, job=0)
+        )
     )
+    # Кнопка оплаты для каждой работы
+    for job_id, desc, cost, done in jobs:
+        kb.insert(
+            InlineKeyboardButton(
+                f"💸 Оплатить #{job_id} ({desc})",
+                callback_data=cb.new(action="mark_paid", project=pid, job=job_id)
+            )
+        )
+
     await cbq.message.edit_text(text, reply_markup=kb)
     await cbq.answer()
 
-# --- Начало добавления работы ---
+# Начало добавления работы
 @dp.callback_query_handler(cb.filter(action="add_job"))
 async def callback_add_job(cbq: types.CallbackQuery, callback_data: dict, state: FSMContext):
     pid = int(callback_data["project"])
     await state.update_data(project_id=pid)
     await cbq.message.answer(
-        "Введите описание работы и стоимость через запятую:\nПример: Покраска бака, 15000"
+        "Введите описание работы и стоимость через запятую:\n"
+        "Пример: Покраска бака, 15000"
     )
     await JobForm.waiting_for_job.set()
     await cbq.answer()
 
-# --- Сохранение работы в БД ---
+# Сохранение работы
 @dp.message_handler(state=JobForm.waiting_for_job, content_types=["text"])
 async def state_save_job(msg: types.Message, state: FSMContext):
     data = await state.get_data()
@@ -191,7 +213,7 @@ async def state_save_job(msg: types.Message, state: FSMContext):
     await msg.answer(f"✅ Работа добавлена к проекту #{pid}")
     await state.finish()
 
-# --- Статус оплат по проекту ---
+# Статус оплат
 @dp.callback_query_handler(cb.filter(action="pay_status"))
 async def callback_pay_status(cbq: types.CallbackQuery, callback_data: dict):
     pid = int(callback_data["project"])
@@ -210,6 +232,31 @@ async def callback_pay_status(cbq: types.CallbackQuery, callback_data: dict):
         text += f"- #{j[0]} {j[1]}: {paid}/{j[2]}₽\n"
     await cbq.message.answer(text)
     await cbq.answer()
+
+# Хендлер оплаты работы
+@dp.callback_query_handler(cb.filter(action="mark_paid"))
+async def callback_mark_paid(cbq: types.CallbackQuery, callback_data: dict):
+    job_id = int(callback_data["job"])
+    # Узнаём стоимость работы
+    conn = sqlite3.connect("data.sqlite")
+    cur = conn.cursor()
+    row = cur.execute("SELECT cost FROM jobs WHERE id=?", (job_id,)).fetchone()
+    if not row:
+        await cbq.answer("Работа не найдена.", show_alert=True)
+        conn.close()
+        return
+    cost = row[0]
+    # Создаём платёж
+    cur.execute(
+        "INSERT INTO payments(job_id, amount, paid_at) VALUES(?,?,?)",
+        (job_id, cost, datetime.datetime.now().isoformat())
+    )
+    conn.commit()
+    conn.close()
+
+    await cbq.answer(f"💰 Работа #{job_id} оплачена: {cost}₽", show_alert=True)
+    # Перерисуем меню проекта
+    await callback_view_project(cbq, {"action":"view", "project": callback_data["project"], "job":"0"})
 
 if __name__ == "__main__":
     executor.start_polling(dp, skip_updates=True)
